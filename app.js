@@ -14,9 +14,6 @@ const express = require('express')
 const app = express()
 const bodyParser = require('body-parser')
 const controller = require('./app/js/NotificationsController')
-const mongojs = require('mongojs')
-const db = mongojs(Settings.mongo.url, ['notifications'])
-const Path = require('path')
 
 metrics.memory.monitor(logger)
 
