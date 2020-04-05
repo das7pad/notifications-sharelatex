@@ -1,10 +1,20 @@
 # This file was auto-generated, do not edit it directly.
 # Instead run bin/update_build_scripts from
-# https://github.com/sharelatex/sharelatex-dev-environment
+# https://github.com/das7pad/sharelatex-dev-env
+
+ifneq (,$(wildcard .git))
+git = git
+else
+# we are in docker, without the .git directory
+git = sh -c 'false'
+endif
 
 BUILD_NUMBER ?= local
-BRANCH_NAME ?= $(shell git rev-parse --abbrev-ref HEAD)
+BRANCH_NAME ?= $(shell $(git) rev-parse --abbrev-ref HEAD || echo master)
+COMMIT ?= $(shell $(git) rev-parse HEAD || echo HEAD)
+RELEASE ?= $(shell $(git) describe --tags || echo v0.0.0 | sed 's/-g/+/;s/^v//')
 PROJECT_NAME = notifications
+BUILD_DIR_NAME = $(shell pwd | xargs basename | tr -cd '[a-zA-Z0-9_.\-]')
 DOCKER_COMPOSE_FLAGS ?= -f docker-compose.yml
 DOCKER_COMPOSE := BUILD_NUMBER=$(BUILD_NUMBER) \
 	BRANCH_NAME=$(BRANCH_NAME) \
@@ -12,51 +22,209 @@ DOCKER_COMPOSE := BUILD_NUMBER=$(BUILD_NUMBER) \
 	MOCHA_GREP=${MOCHA_GREP} \
 	docker-compose ${DOCKER_COMPOSE_FLAGS}
 
+ifneq (,$(DOCKER_REGISTRY))
+IMAGE_NODE ?= $(DOCKER_REGISTRY)/node:12.16.1
+else
+IMAGE_NODE ?= node:12.16.1
+endif
+
+clean_ci: clean
+clean_ci: clean_build
+
+clean_build:
+	docker rmi \
+		ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER) \
+		ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-base \
+		ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-dev-deps \
+		ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-dev \
+		ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-prod \
+		ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-dev-deps-cache \
+		ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-prod-cache \
+		--force
+
 clean:
-	docker rmi ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)
-	docker rmi gcr.io/overleaf-ops/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)
 
-format:
-	$(DOCKER_COMPOSE) run --rm test_unit npm run format
-
-format_fix:
-	$(DOCKER_COMPOSE) run --rm test_unit npm run format:fix
-
+test: lint
 lint:
-	$(DOCKER_COMPOSE) run --rm test_unit npm run lint
+test: format
+format:
 
-test: format lint test_unit test_acceptance
+SHARELATEX_DOCKER_REPOS ?= local/sharelatex
+LINT_RUNNER_IMAGE ?= \
+	$(SHARELATEX_DOCKER_REPOS)/lint-runner:1.0.0
+LINT_RUNNER = \
+	docker run \
+		--rm \
+		--tty \
+		--volume $(PWD):$(PWD) \
+		--workdir $(PWD) \
+		--user $(shell id -u):$(shell id -g) \
+		$(LINT_RUNNER_IMAGE)
 
+GIT_PREVIOUS_SUCCESSFUL_COMMIT ?= $(shell \
+	$(git) rev-parse --abbrev-ref --symbolic-full-name dev@{u} 2>/dev/null \
+	| grep -e /dev \
+	|| echo origin/dev)
+
+NEED_FULL_LINT ?= \
+	$(shell $(git) diff $(GIT_PREVIOUS_SUCCESSFUL_COMMIT) --name-only \
+			| grep --max-count=1 \
+				-e .eslintignore \
+				-e .eslintrc \
+				-e buildscript.txt \
+	)
+
+ifeq (,$(NEED_FULL_LINT))
+lint: lint_partial
+else
+lint: lint_full
+endif
+
+RUN_LINT ?= $(LINT_RUNNER) eslint
+lint_full:
+	$(RUN_LINT) .
+
+GIT_DIFF_CMD_FORMAT ?= \
+	$(git) diff $(GIT_PREVIOUS_SUCCESSFUL_COMMIT) --name-only \
+	| grep --invert-match \
+		-e vendor \
+	| grep \
+		-e '\.js$$' \
+	| sed 's|^|$(PWD)/|'
+
+FILES_FOR_FORMAT ?= $(wildcard $(shell $(GIT_DIFF_CMD_FORMAT)))
+FILES_FOR_LINT ?= $(FILES_FOR_FORMAT)
+
+lint_partial:
+ifneq (,$(FILES_FOR_LINT))
+	$(RUN_LINT) $(FILES_FOR_LINT)
+endif
+
+NEED_FULL_FORMAT ?= \
+	$(shell $(git) diff $(GIT_PREVIOUS_SUCCESSFUL_COMMIT) --name-only \
+			| grep --max-count=1 \
+				-e .prettierignore \
+				-e .prettierrc \
+				-e buildscript.txt \
+	)
+
+ifeq (,$(NEED_FULL_FORMAT))
+format: format_partial
+format_fix: format_fix_partial
+else
+format: format_full
+format_fix: format_fix_full
+endif
+
+RUN_FORMAT ?= $(LINT_RUNNER) prettier-eslint
+format_full:
+	$(RUN_FORMAT) '$(PWD)/**/*.{js,less}' --list-different
+format_fix_full:
+	$(RUN_FORMAT) '$(PWD)/**/*.{js,less}' --write
+
+format_partial:
+ifneq (,$(FILES_FOR_LINT))
+	$(RUN_FORMAT) $(FILES_FOR_FORMAT) --list-different
+endif
+format_fix_partial:
+ifneq (,$(FILES_FOR_LINT))
+	$(RUN_FORMAT) $(FILES_FOR_FORMAT) --write
+endif
+
+UNIT_TEST_DOCKER_COMPOSE ?= \
+	COMPOSE_PROJECT_NAME=unit_test_$(BUILD_DIR_NAME) $(DOCKER_COMPOSE)
+
+test: test_unit
 test_unit:
-	@[ ! -d test/unit ] && echo "notifications has no unit tests" || $(DOCKER_COMPOSE) run --rm test_unit
+	$(UNIT_TEST_DOCKER_COMPOSE) run --rm test_unit
 
-test_acceptance: test_clean test_acceptance_pre_run test_acceptance_run
+clean_ci: clean_test_unit
+clean_test_unit:
+	$(UNIT_TEST_DOCKER_COMPOSE) down --timeout 0
 
-test_acceptance_debug: test_clean test_acceptance_pre_run test_acceptance_run_debug
+ACCEPTANCE_TEST_DOCKER_COMPOSE ?= \
+	COMPOSE_PROJECT_NAME=acceptance_test_$(BUILD_DIR_NAME) $(DOCKER_COMPOSE)
 
-test_acceptance_run:
-	@[ ! -d test/acceptance ] && echo "notifications has no acceptance tests" || $(DOCKER_COMPOSE) run --rm test_acceptance
+test: test_acceptance
+test_acceptance: test_acceptance_app
+test_acceptance_run: test_acceptance_app_run
+test_acceptance_app: clean_test_acceptance_app
+test_acceptance_app: test_acceptance_app_run
 
-test_acceptance_run_debug:
-	@[ ! -d test/acceptance ] && echo "notifications has no acceptance tests" || $(DOCKER_COMPOSE) run -p 127.0.0.9:19999:19999 --rm test_acceptance npm run test:acceptance -- --inspect=0.0.0.0:19999 --inspect-brk
+test_acceptance_app_run:
 
-test_clean:
-	$(DOCKER_COMPOSE) down -v -t 0
-
+test_acceptance_app_run: test_acceptance_pre_run
 test_acceptance_pre_run:
-	@[ ! -f test/acceptance/js/scripts/pre-run ] && echo "notifications has no pre acceptance tests task" || $(DOCKER_COMPOSE) run --rm test_acceptance test/acceptance/js/scripts/pre-run
 
-build:
-	docker build --pull --tag ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER) \
-		--tag gcr.io/overleaf-ops/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER) \
+clean_ci: clean_test_acceptance
+clean_test_acceptance: clean_test_acceptance_app
+clean_test_acceptance_app:
+
+build_app:
+
+build: clean_build_artifacts
+	docker build \
+		--cache-from ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-dev-deps-cache \
+		--tag ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-base \
+		--target base \
 		.
 
-tar:
-	$(DOCKER_COMPOSE) up tar
+	docker build \
+		--cache-from ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-base \
+		--cache-from ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-dev-deps-cache \
+		--tag ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-dev-deps \
+		--target dev-deps \
+		.
 
-publish:
+	docker build \
+		--cache-from ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-dev-deps \
+		--tag ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER) \
+		--tag ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-dev \
+		--target dev \
+		.
 
-	docker push $(DOCKER_REPO)/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)
+build_prod: clean_build_artifacts
+	docker build \
+		--cache-from ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-dev \
+		--tag ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-base \
+		--target base \
+		.
 
+	docker run \
+		--rm \
+		--entrypoint tar \
+		ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-dev \
+			--create \
+			--gzip \
+			app.js \
+			app/js \
+			config \
+		> build_artifacts.tar.gz
 
-.PHONY: clean test test_unit test_acceptance test_clean build publish
+	docker build \
+		--build-arg RELEASE=$(RELEASE) \
+		--build-arg COMMIT=$(COMMIT) \
+		--build-arg BASE=ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-base \
+		--cache-from ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-base \
+		--cache-from ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-prod-cache \
+		--tag ci/$(PROJECT_NAME):$(BRANCH_NAME)-$(BUILD_NUMBER)-prod \
+		--file=Dockerfile.production \
+		.
+
+clean_ci: clean_build_artifacts
+clean_build_artifacts:
+	rm -f build_artifacts.tar.gz
+
+clean_ci: clean_output
+clean_output:
+ifneq (,$(wildcard output/*))
+	docker run --rm \
+		--volume $(PWD)/output:/home/node \
+		--user node \
+		--network none \
+		$(IMAGE_NODE) \
+		sh -c 'find /home/node -mindepth 1 | xargs rm -rfv'
+	rm -rfv output
+endif
+
+.PHONY: clean test test_unit test_acceptance test_clean build

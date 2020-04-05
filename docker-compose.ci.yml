@@ -1,41 +1,43 @@
 # This file was auto-generated, do not edit it directly.
 # Instead run bin/update_build_scripts from
-# https://github.com/sharelatex/sharelatex-dev-environment
+# https://github.com/das7pad/sharelatex-dev-env
 
-version: "2.3"
+version: "3.1"
 
 services:
   test_unit:
     image: ci/$PROJECT_NAME:$BRANCH_NAME-$BUILD_NUMBER
     user: node
-    command: npm run test:unit:_run
-    environment:
-      NODE_ENV: test
-
+    command:
+      - npx
+      - mocha
+      - --exit
+      - --recursive
+      - --reporter
+      - xunit
+      - --reporter-options
+      - output=/home/node/unit.xml,suiteName='Unit Tests'
+      - test/unit/js
+    volumes:
+      - ./output:/home/node:z
 
   test_acceptance:
     build: .
     image: ci/$PROJECT_NAME:$BRANCH_NAME-$BUILD_NUMBER
     environment:
-      ELASTIC_SEARCH_DSN: es:9200
-      REDIS_HOST: redis
-      MONGO_HOST: mongo
-      POSTGRES_HOST: postgres
+      LOG_LEVEL: fatal
       MOCHA_GREP: ${MOCHA_GREP}
-      NODE_ENV: test
-    depends_on:
-      mongo:
-        condition: service_healthy
     user: node
-    command: npm run test:acceptance:_run
-
-
-  tar:
-    build: .
-    image: ci/$PROJECT_NAME:$BRANCH_NAME-$BUILD_NUMBER
+    entrypoint:
+      - npx
+      - mocha
+      - --exit
+      - --recursive
+      - --reporter
+      - xunit
+      - --reporter-options
+    command:
+      - output=/home/node/acceptance.xml,suiteName='App Acceptance Tests'
+      - test/acceptance/js
     volumes:
-      - ./:/tmp/build/
-    command: tar -czf /tmp/build/build.tar.gz --exclude=build.tar.gz --exclude-vcs .
-    user: root
-  mongo:
-    image: mongo:3.6
+      - ./output:/home/node:z
