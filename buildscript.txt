@@ -1,4 +1,4 @@
 notifications
 --language=es
---node-version=12.16.1
+--node-version=12.16.2
 --lint-runner-version=1.0.1
