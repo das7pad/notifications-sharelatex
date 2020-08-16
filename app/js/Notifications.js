@@ -19,7 +19,7 @@ const db = mongojs(Settings.mongo != null ? Settings.mongo.url : undefined, [
   'notifications'
 ])
 const { ObjectId } = require('mongojs')
-const metrics = require('metrics-sharelatex')
+const metrics = require('@overleaf/metrics')
 
 module.exports = Notifications = {
   getUserNotifications(user_id, callback) {

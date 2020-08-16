@@ -55,7 +55,7 @@ describe('Notifications Tests', function () {
         },
         'settings-sharelatex': {},
         mongojs: this.mongojs,
-        'metrics-sharelatex': { timeAsyncMethod: sinon.stub() }
+        '@overleaf/metrics': { timeAsyncMethod: sinon.stub() }
       },
       globals: {
         console
